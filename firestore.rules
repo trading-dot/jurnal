@@ -1,0 +1,37 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{d}/documents {
+    function signed() { return request.auth != null && request.auth.token.email_verified == true; }
+    function own(u) { return signed() && request.auth.uid == u; }
+    function mail() { return request.auth.token.email.lower(); }
+    function isAdmin() { return signed() && exists(/databases/$(d)/documents/admins/$(request.auth.uid)); }
+    function paid() {
+      let p = /databases/$(d)/documents/access/$(mail());
+      return exists(p) && get(p).data.active == true
+        && (get(p).data.expiresAt == null || get(p).data.expiresAt > request.time);
+    }
+    function ok() { return isAdmin() || (signed() && paid()); }
+
+    // Dibuat MANUAL lewat Firebase Console. Tidak bisa ditulis dari klien.
+    match /admins/{u} { allow read: if own(u); allow write: if false; }
+
+    // Whitelist pelanggan: ID dokumen = email huruf kecil.
+    // get  : siapa saja (halaman Daftar mengecek 1 email; daftar lengkap tidak bisa diambil).
+    // list & tulis : admin saja.
+    match /access/{e} {
+      allow get: if true;
+      allow list: if isAdmin();
+      allow write: if isAdmin();
+    }
+
+    match /users/{u} {
+      allow read: if own(u) || isAdmin();
+      allow write: if own(u) && request.resource.data.keys().hasOnly(['email','createdAt','lastLogin','currency','onboarded']);
+      match /{col}/{id} {
+        allow read, delete: if own(u) && ok() && col in ['accounts','trades','cashTransactions'];
+        allow create, update: if own(u) && ok() && col in ['accounts','trades','cashTransactions']
+          && request.resource.data.keys().size() < 40;
+      }
+    }
+  }
+}
