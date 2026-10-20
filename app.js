@@ -1,12 +1,17 @@
 import * as F from './firebase.js';
 import { parse } from './quick-bot.js';
 import { accessOf } from './access.js';
+import { fmtNum, num, fmtLive } from './numfmt.js';
 const { auth, db } = F, $ = s => document.querySelector(s);
 const st = { user: null, admin: false, accounts: [], trades: [], cash: [], cur: 'USD', view: 'dashboard', acc: 'all', f: { q: '', res: '', sort: 'desc', from: '', to: '' }, per: 'day', cal: new Date(), day: null, bot: [], draft: null, unsub: [], onboarded: false, welcomed: false };
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const money = n => n == null ? '–' : new Intl.NumberFormat(st.cur === 'IDR' ? 'id-ID' : 'en-US', { style: 'currency', currency: st.cur, maximumFractionDigits: st.cur === 'IDR' ? 0 : 2 }).format(n);
-const num = v => v === '' || v == null ? null : +v;
-const f2 = (n, d = 2) => n == null ? '–' : n.toFixed(d);
+const nfm = d => new Intl.NumberFormat('id-ID', { minimumFractionDigits: d, maximumFractionDigits: d });
+const nf = new Intl.NumberFormat('id-ID', { maximumFractionDigits: 2 });
+const money = n => { if (n == null) return '–'; const idr = st.cur === 'IDR', d = idr ? 0 : 2; return (n <= -(idr ? .5 : .005) ? '-' : '') + (idr ? 'Rp ' : '$') + nfm(d).format(Math.abs(n)); };
+const f2 = (n, d = 2) => n == null || isNaN(n) ? '–' : nfm(d).format(n);
+const pct = (n, base) => base > 0 && n != null ? (n > 0 ? '+' : '') + f2(n / base * 100) + '%' : '';
+const subPct = n => start() > 0 ? `<span class="sub">${pct(n, start())} dari modal awal</span>` : '';
+const pill = (n, base) => base > 0 ? `<div class="pill ${cls(n)}">${n > 0 ? '▲ Naik ' : n < 0 ? '▼ Turun ' : ''}${pct(n, base)} dari modal awal</div>` : '';
 const cls = n => n > 0 ? 'pos' : n < 0 ? 'neg' : '';
 const today = () => new Date().toLocaleDateString('sv');
 const toast = m => { const t = $('#toast'); t.textContent = m; t.hidden = false; setTimeout(() => t.hidden = true, 3500); };
@@ -39,6 +44,28 @@ const line = pts => {
 };
 const bars = rows => !rows.length ? '<p class="mu">Belum ada data.</p>' : `<svg viewBox="0 0 300 90" style="width:100%">${(() => { const m = Math.max(...rows.map(r => Math.abs(r[1])), 1), w = 300 / rows.length; return rows.map((r, i) => { const h = Math.abs(r[1]) / m * 38; return `<rect x="${i * w + 1}" y="${r[1] >= 0 ? 45 - h : 45}" width="${Math.max(w - 2, 1)}" height="${Math.max(h, 1)}" fill="${r[1] >= 0 ? 'var(--g)' : 'var(--r)'}"><title>${esc(r[0])}: ${money(r[1])}</title></rect>`; }).join(''); })()}</svg>`;
 
+// ---------- Prop firm: target & max drawdown ----------
+const tcmp = (x, y) => x.tradeDate < y.tradeDate ? -1 : x.tradeDate > y.tradeDate ? 1 : (x.time || '') < (y.time || '') ? -1 : (x.time || '') > (y.time || '') ? 1 : 0;
+function propStat(a) {
+  const base = a.accountSize || 0; if (a.type !== 'prop' || !base) return null;
+  const tr = st.trades.filter(t => t.accountId === a.id && t.result !== 'open' && t.profitLoss != null).sort(tcmp), trail = a.ddType === 'trailing';
+  let bal = base, peak = base, worst = 0;
+  tr.forEach(t => { bal += t.profitLoss; peak = Math.max(peak, bal); worst = Math.max(worst, (trail ? peak : base) - bal); });
+  const net = bal - base, tgt = a.profitTarget ? base * a.profitTarget / 100 : null, lim = a.maxDrawdown ? base * a.maxDrawdown / 100 : null, cur = Math.max(0, (trail ? peak : base) - bal);
+  return { base, net, tgt, lim, cur, worst, hit: tgt != null && net >= tgt, breach: lim != null && worst >= lim };
+}
+function propBox(a) {
+  const p = propStat(a); if (!p || (p.tgt == null && p.lim == null)) return '';
+  const part = (title, right, ratio, c, note) => `<div class="pb"><div class="t"><b>${title}</b><span>${right}</span></div><div class="pg"><i class="${c}" style="width:${Math.min(100, Math.max(0, ratio * 100)).toFixed(1)}%"></i></div><small class="mu">${note}</small></div>`;
+  const tg = p.tgt == null ? '' : part(`Target profit ${nf.format(a.profitTarget)}%`, p.hit ? '<span class="pos">Tercapai ✓</span>' : f2(Math.max(0, p.net) / p.tgt * 100, 0) + '%', p.net / p.tgt, p.hit ? 'g' : '',
+    `Profit ${money(p.net)} (${pct(p.net, p.base) || '0,00%'}) dari target ${money(p.tgt)}${p.hit ? '' : ' · kurang ' + money(p.tgt - p.net)}`);
+  const r = p.lim == null ? 0 : p.cur / p.lim;
+  const dd = p.lim == null ? '' : part(`Max drawdown ${nf.format(a.maxDrawdown)}% · ${a.ddType === 'trailing' ? 'Trailing' : 'Statis'}`, p.breach ? '<span class="neg">Batas tersentuh ✗</span>' : f2(r * 100, 0) + '% terpakai', r, p.breach || r >= 1 ? 'r' : r >= .7 ? 'y' : '',
+    `Drawdown saat ini ${money(p.cur)} (${f2(p.cur / p.base * 100)}%) dari batas ${money(p.lim)} · sisa ${money(Math.max(0, p.lim - p.cur))}${p.worst > p.cur ? ' · terdalam ' + money(p.worst) : ''}`);
+  return tg + dd + '<small class="mu" style="display:block;margin-top:8px">Dihitung dari trade yang sudah ditutup (realized), bukan equity floating.</small>';
+}
+const propCards = () => st.accounts.filter(a => accIds().has(a.id) && a.status !== 'Archived').map(a => { const b = propBox(a); return b ? `<div class="card"><b>${esc(a.accountLabel)}</b> <small class="mu">${esc(a.providerName)} · ${esc(a.status)}</small>${b}</div>` : ''; }).join('');
+
 // ---------- Views ----------
 const V = {};
 const stat = (l, v, c = '') => `<div class="card"><small>${l}</small><h2 class="${c}">${v}</h2></div>`;
@@ -47,10 +74,10 @@ V.dashboard = () => {
   const t = ft(), s = calc(t), ym = today().slice(0, 7), sm = calc(t.filter(x => x.tradeDate.startsWith(ym)));
   const ids = accIds(), cash = st.cash.filter(c => ids.has(c.accountId)).reduce((a, c) => a + cashAmt(c), 0), bal = start() + cash + s.net;
   if (!st.accounts.length) return '<div class="card">Belum ada akun trading. Buka <b>Akun</b> untuk menambah akun pertama.</div>';
-  return `<div class="card hero"><small>Balance (modal awal + cash flow + realized P/L)</small><h2>${money(bal)}</h2><small>Realized P/L: <span class="${cls(s.net)}">${money(s.net)}</span> · Cash flow: ${money(cash)}</small></div>
+  return `<div class="card hero"><small>Balance (modal awal + cash flow + realized P/L)</small><h2>${money(bal)}</h2>${pill(s.net, start())}<small>Realized P/L: <span class="${cls(s.net)}">${money(s.net)}</span> · Cash flow: ${money(cash)}</small></div>${propCards()}
   <div class="grid">${stat('Total trade', s.n)}${stat('Win / Loss', s.w + ' / ' + s.l)}${stat('Win rate', s.wr == null ? '–' : f2(s.wr, 1) + '%')}${stat('Profit factor', f2(s.pf))}
   ${stat('Total profit', money(s.gp), 'pos')}${stat('Total loss', money(-s.gl), 'neg')}${stat('Avg R:R (avg win/avg loss)', f2(s.rr))}${stat('Rata-rata/trade', money(s.avg), cls(s.avg))}</div>
-  <div class="card"><small>Bulan ini</small><h2 class="${cls(sm.net)}">${money(sm.net)}</h2><small>${sm.n} trade</small></div>
+  <div class="card"><small>Bulan ini</small><h2 class="${cls(sm.net)}">${money(sm.net)}</h2><small>${sm.n} trade${start() > 0 ? ' · ' + pct(sm.net, start()) : ''}</small></div>
   <div class="card"><small>Perkembangan balance</small>${line(balanceSeries())}</div>
   <div class="card"><b>Trade terbaru</b>${[...t].sort((a, b) => b.tradeDate < a.tradeDate ? -1 : 1).slice(0, 6).map(tradeRow).join('') || '<p class="mu">Belum ada trade. Tekan + atau gunakan bot.</p>'}</div>`;
 };
@@ -78,7 +105,7 @@ V.stats = () => {
   let peak = 0, cum = 0, dd = 0; c.forEach(x => { cum += x.profitLoss; peak = Math.max(peak, cum); dd = Math.max(dd, peak - cum); });
   const key = x => st.per === 'month' ? x.tradeDate.slice(0, 7) : st.per === 'week' ? (d => (d.setDate(d.getDate() - (d.getDay() + 6) % 7), d.toLocaleDateString('sv')))(new Date(x.tradeDate + 'T00:00')) : x.tradeDate;
   const per = group(c, key).sort((a, b) => a[0] < b[0] ? -1 : 1).map(r => [r[0], r[1].net]);
-  return filt() + `<div class="grid">${stat('Win rate', s.wr == null ? '–' : f2(s.wr, 1) + '%')}${stat('Profit factor', f2(s.pf))}${stat('Avg win', money(s.avgW), 'pos')}${stat('Avg loss', money(s.avgL ? -s.avgL : null), 'neg')}${stat('Net P/L', money(s.net), cls(s.net))}${stat('R:R rata-rata', f2(s.rr))}${stat('Max drawdown (P/L)', c.length ? money(-dd) : '–', 'neg')}${stat('Total trade', s.n)}</div>
+  return filt() + `<div class="grid">${stat('Win rate', s.wr == null ? '–' : f2(s.wr, 1) + '%')}${stat('Profit factor', f2(s.pf))}${stat('Avg win', money(s.avgW), 'pos')}${stat('Avg loss', money(s.avgL ? -s.avgL : null), 'neg')}${stat('Net P/L', money(s.net) + subPct(s.net), cls(s.net))}${stat('R:R rata-rata', f2(s.rr))}${stat('Max drawdown (P/L)', c.length ? money(-dd) + (dd > 0 ? subPct(-dd) : '') : '–', 'neg')}${stat('Total trade', s.n)}</div>
   <p class="mu">Drawdown dihitung dari kurva kumulatif P/L trade. Metrik "–" = data belum cukup (mis. R:R butuh minimal 1 win dan 1 loss).</p>
   <div class="card"><div class="row"><b>Hasil per periode</b><select id="per">${['day', 'week', 'month'].map(p => `<option value="${p}" ${st.per === p ? 'selected' : ''}>${{ day: 'Harian', week: 'Mingguan', month: 'Bulanan' }[p]}</option>`).join('')}</select></div>${bars(per)}</div>
   ${tb('Per instrumen', group(c, x => x.instrument))}${tb('Per strategi', group(c, x => x.strategy))}${tb('Per hari', group(c, x => hari[new Date(x.tradeDate + 'T00:00').getDay()]))}${tb('Per jam entry', group(c, x => x.time ? x.time.slice(0, 2) + ':00' : null))}`;
@@ -86,7 +113,7 @@ V.stats = () => {
 V.accounts = () => `<button class="pri" data-act="addAcc">+ Tambah akun</button><br><br>${st.accounts.map(a => {
   const ids = [a.id], net = calc(st.trades.filter(t => t.accountId === a.id)).net, cs = st.cash.filter(c => c.accountId === a.id), cf = cs.reduce((s, c) => s + cashAmt(c), 0), base = (a.type === 'prop' ? a.accountSize : a.initialBalance) || 0;
   return `<div class="card"><b>${esc(a.accountLabel)}</b> <small class="mu">${a.type === 'prop' ? 'Prop Firm' : 'Broker'} · ${esc(a.providerName)} · ${a.status}</small>
-  <p>Modal awal: ${money(base)}<br>Realized P/L: <span class="${cls(net)}">${money(net)}</span><br>Cash flow: ${money(cf)}<br><b>Balance: ${money(base + net + cf)}</b></p>
+  <p>Modal awal: ${money(base)}<br>Realized P/L: <span class="${cls(net)}">${money(net)}${base > 0 ? ' (' + (pct(net, base) || '0,00%') + ')' : ''}</span><br>Cash flow: ${money(cf)}<br><b>Balance: ${money(base + net + cf)}</b></p>${propBox(a)}
   <div class="row"><button data-act="cash" data-id="${a.id}">Deposit/WD</button><button data-act="editAcc" data-id="${a.id}">Edit</button><button data-act="arch" data-id="${a.id}">${a.status === 'Archived' ? 'Aktifkan' : 'Arsip'}</button><button class="dng" data-act="delAcc" data-id="${a.id}">Hapus</button></div>
   ${cs.length ? `<small class="mu">${cs.sort((x, y) => x.transactionDate < y.transactionDate ? 1 : -1).slice(0, 3).map(c => `${c.transactionDate} ${c.type} ${money(c.amount)}`).join(' | ')}</small>` : ''}</div>`;
 }).join('') || '<p class="mu">Belum ada akun.</p>'}`;
@@ -111,7 +138,7 @@ function render() {
 
 // ---------- Forms ----------
 function form(title, fields, vals, onSave) {
-  const m = $('#modal'), fld = ([n, l, t, o, k]) => { const v = vals[n] ?? ''; return `<label data-k="${k || ''}">${l}${t === 'select' ? `<select name="${n}">${o.map(x => { const [a, b] = Array.isArray(x) ? x : [x, x]; return `<option value="${esc(a)}" ${a == v ? 'selected' : ''}>${esc(b)}</option>`; }).join('')}</select>` : t === 'area' ? `<textarea name="${n}" rows="3">${esc(v)}</textarea>` : `<input name="${n}" type="${t}" value="${esc(v)}" step="any">`}</label>`; };
+  const m = $('#modal'), fld = ([n, l, t, o, k]) => { const v = vals[n] ?? ''; return `<label data-k="${k || ''}">${l}${t === 'select' ? `<select name="${n}">${o.map(x => { const [a, b] = Array.isArray(x) ? x : [x, x]; return `<option value="${esc(a)}" ${a == v ? 'selected' : ''}>${esc(b)}</option>`; }).join('')}</select>` : t === 'area' ? `<textarea name="${n}" rows="3">${esc(v)}</textarea>` : t === 'number' ? `<input class="numf" name="${n}" type="text" inputmode="decimal" autocomplete="off" value="${esc(fmtNum(v))}">` : `<input name="${n}" type="${t}" value="${esc(v)}">`}</label>`; };
   m.innerHTML = `<div class="sheet"><h3>${title}</h3><form id="f">${fields.map(fld).join('')}<div class="row"><button type="button" class="ghost" data-act="close">Batal</button><button class="pri">Simpan</button></div></form></div>`; m.hidden = false;
   const tk = () => { const t = $('#f [name=type]'); if (t) document.querySelectorAll('#f [data-k]').forEach(l => l.hidden = l.dataset.k && l.dataset.k !== t.value); };
   tk(); $('#f').onchange = tk;
@@ -126,9 +153,12 @@ const tradeForm = (v = {}, id) => form(id ? 'Edit trade' : 'Tambah trade', [['tr
   if (id) await F.updateDoc(ref('trades', id), { ...o, updatedAt: F.serverTimestamp() }); else await F.addDoc(col('trades'), { ...o, source: st.fromBot ? 'quickbot' : 'manual', createdAt: F.serverTimestamp(), updatedAt: F.serverTimestamp() });
   st.fromBot = false; toast('Trade disimpan');
 });
-const accForm = (v = {}, id) => form(id ? 'Edit akun' : 'Tambah akun', [['type', 'Jenis akun', 'select', [['prop', 'Prop Firm'], ['broker', 'Broker']]], ['providerName', 'Nama prop firm / broker', 'text'], ['accountLabel', 'Label akun', 'text'], ['accountSize', 'Nominal funded account', 'number', null, 'prop'], ['initialBalance', 'Balance/modal awal', 'number', null, 'broker'], ['currency', 'Mata uang', 'text'], ['status', 'Status', 'select', ['Evaluation', 'Funded', 'Passed', 'Failed', 'Active', 'Archived']], ['startDate', 'Tanggal mulai', 'date'], ['notes', 'Catatan', 'area']], { type: 'prop', currency: 'USD', startDate: today(), ...v }, async d => {
+const accForm = (v = {}, id) => form(id ? 'Edit akun' : 'Tambah akun', [['type', 'Jenis akun', 'select', [['prop', 'Prop Firm'], ['broker', 'Broker']]], ['providerName', 'Nama prop firm / broker', 'text'], ['accountLabel', 'Label akun', 'text'], ['accountSize', 'Nominal funded account', 'number', null, 'prop'], ['profitTarget', 'Target profit evaluasi (% dari nominal, opsional)', 'number', null, 'prop'], ['maxDrawdown', 'Max drawdown (% dari nominal, opsional)', 'number', null, 'prop'], ['ddType', 'Tipe max drawdown', 'select', [['static', 'Statis (dari modal awal)'], ['trailing', 'Trailing (dari balance tertinggi)']], 'prop'], ['initialBalance', 'Balance/modal awal', 'number', null, 'broker'], ['currency', 'Mata uang', 'text'], ['status', 'Status', 'select', ['Evaluation', 'Funded', 'Passed', 'Failed', 'Active', 'Archived']], ['startDate', 'Tanggal mulai', 'date'], ['notes', 'Catatan', 'area']], { type: 'prop', currency: 'USD', ddType: 'static', startDate: today(), ...v }, async d => {
   if (!d.providerName.trim() || !d.accountLabel.trim()) throw new Error('Nama dan label akun wajib diisi.');
-  const o = { ...d, accountSize: d.type === 'prop' ? num(d.accountSize) : null, initialBalance: d.type === 'broker' ? num(d.initialBalance) : null };
+  const prop = d.type === 'prop', pt = prop ? num(d.profitTarget) : null, md = prop ? num(d.maxDrawdown) : null;
+  if ([pt, md].some(x => x != null && (x <= 0 || x > 100))) throw new Error('Target dan max drawdown diisi dalam persen (di atas 0 sampai 100).');
+  if ((pt != null || md != null) && !num(d.accountSize)) throw new Error('Isi nominal funded account agar target dan drawdown bisa dihitung.');
+  const o = { ...d, accountSize: prop ? num(d.accountSize) : null, initialBalance: d.type === 'broker' ? num(d.initialBalance) : null, profitTarget: pt, maxDrawdown: md, ddType: prop ? d.ddType || 'static' : null };
   if (id) await F.updateDoc(ref('accounts', id), o); else await F.addDoc(col('accounts'), { ...o, createdAt: F.serverTimestamp() });
 });
 const cashForm = (v = {}) => form('Deposit / withdrawal / payout', [['type', 'Jenis', 'select', [['deposit', 'Deposit'], ['withdrawal', 'Withdrawal'], ['payout', 'Payout (prop firm)']]], ['amount', 'Nominal', 'number'], ['transactionDate', 'Tanggal', 'date'], ['notes', 'Catatan', 'area']], { transactionDate: today(), ...v }, async d => {
@@ -185,6 +215,12 @@ document.addEventListener('change', e => {
   const i = e.target.id, v = e.target.value, m = { fq: 'q', fr: 'res', ff: 'from', fo: 'to', fs: 'sort' };
   if (i === 'accSel') st.acc = v; else if (m[i]) st.f[m[i]] = v; else if (i === 'per') st.per = v;
   else if (i === 'cur') { st.cur = v; F.setDoc(F.doc(db, 'users', st.user.uid), { currency: v }, { merge: true }); } else return; render();
+});
+// ---------- Input angka: titik ribuan otomatis (1.234.567,89) ----------
+document.addEventListener('input', e => {
+  const el = e.target; if (!el.classList || !el.classList.contains('numf')) return;
+  const [t, c] = fmtLive(el.value, el.selectionStart ?? el.value.length, e.data === '.' || e.data === ',', e.inputType === 'insertFromPaste');
+  if (t !== el.value) { el.value = t; try { el.setSelectionRange(c, c); } catch { } }
 });
 // ---------- Tombol back HP: tutup popup dulu, lalu pindah halaman sebelumnya, tidak keluar dari web ----------
 history.replaceState({ g: 1 }, ''); history.pushState({ v: st.view }, '');

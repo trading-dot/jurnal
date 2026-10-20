@@ -24,6 +24,12 @@ Hanya email yang sudah dimasukkan admin yang bisa daftar. Daftar dengan Google: 
 ## 4. Deploy GitHub Pages
 Upload semua file (tanpa folder) ke repo, langsung di root → Settings → Pages → Deploy from branch `main` / root.
 
+## Format angka & prop firm
+- Semua kolom angka otomatis diberi titik ribuan saat diketik (`1.234.567`). Desimal pakai koma (`0,01`); mengetik titik atau koma di kolom angka dianggap desimal.
+- Tampilan uang: `$1.234,50` atau `Rp 1.500.000`.
+- Akun Prop Firm punya kolom **Target profit (%)**, **Max drawdown (%)** dan **Tipe drawdown** (Statis dari modal awal / Trailing dari balance tertinggi). Persen dihitung dari nominal funded account. Progress tampil di Dashboard dan menu Akun. Dihitung dari trade yang sudah ditutup (realized), bukan equity floating; urutan trade di hari yang sama mengikuti jam entry.
+- Persen kenaikan/penurunan = realized P/L / modal awal (tidak menghitung deposit/withdrawal).
+
 ## Status fitur
 Berfungsi (kode lengkap, **hanya cek sintaks yang saya jalankan; belum diuji langsung ke Firebase**): login Google/email, reset password, verifikasi email, whitelist+expiry, halaman admin terpisah (admin.html), akun (prop/broker), deposit/withdrawal/payout, jurnal CRUD+filter, kalender, statistik, bot Catat Cepat (rule-based, preview sebelum simpan).
 Belum ada: upload screenshot chart (butuh Firebase Storage), impor CSV, webhook TradingView/MT4/MT5 (butuh Cloud Functions, plan Blaze), bot AI (butuh backend, jangan taruh API key di frontend), konfigurasi pip/contract per instrumen (P/L diisi manual agar tidak salah asumsi).
